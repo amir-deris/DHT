@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -41,7 +42,7 @@ func (c *Config) Validate() error {
 		c.WriteQuorum = 2
 	}
 	if c.ReadQuorum > c.ReplicationFactor || c.WriteQuorum > c.ReplicationFactor {
-		return fmt.Errorf("R and W must be <= N (R=%d W=%d N=%d)", c.ReadQuorum, c.WriteQuorum, c.ReplicationFactor)
+		return fmt.Errorf("unexpected replication configuration(R=%d W=%d N=%d)", c.ReadQuorum, c.WriteQuorum, c.ReplicationFactor)
 	}
 	if c.SeedsCSV != "" {
 		parts := strings.Split(c.SeedsCSV, ",")
@@ -66,14 +67,4 @@ func generateDefaultNodeID() string {
 	return "node-unknown"
 }
 
-// osHostname exists for testability.
-var osHostname = func() (string, error) { return getHostname() }
-
-func getHostname() (string, error) { return hostname() }
-
-// indirection to avoid importing os in tests directly here if needed
-func hostname() (string, error) { return osHostnameImpl() }
-
-var osHostnameImpl = func() (string, error) { return osHostnameReal() }
-
-// real implementation in a separate file to keep this file minimal.
+var osHostname = func() (string, error) { return os.Hostname() }

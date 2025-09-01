@@ -2,8 +2,7 @@ package storage
 
 import "sync"
 
-// Engine defines the minimal KV operations used by the node.
-type Engine interface {
+type Storer interface {
 	Get(key string) (value []byte, ok bool)
 	Put(key string, value []byte) error
 	Delete(key string) error

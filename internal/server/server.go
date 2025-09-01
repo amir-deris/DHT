@@ -32,6 +32,7 @@ func NewHTTPServer(cfg *config.Config) *HTTPServer {
 
 	// Set ready true after initialization; in Phase 1.1 we flip immediately
 	s.readyFlag.Store(true)
+
 	return s
 }
 
