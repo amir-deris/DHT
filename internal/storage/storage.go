@@ -2,7 +2,7 @@ package storage
 
 import "sync"
 
-type Storer interface {
+type Engine interface {
 	Get(key string) (value []byte, ok bool)
 	Put(key string, value []byte) error
 	Delete(key string) error
