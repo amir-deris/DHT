@@ -37,3 +37,47 @@ jobs:
       - name: Run Staticcheck
         # https://github.com/dominikh/go-tools/releases/tag/2025.1.1
         run: go run honnef.co/go/tools/cmd/staticcheck@b8ec13ce4d00445d75da053c47498e6f9ec5d7d6 ./...
+      - name: Start the server
+        run: |
+          go run ./cmd/dhtnode --node-id=test-node --bind=:8080 &
+          sleep 5  # Give the server time to start up
+
+      # PUT operation - store a key-value pair
+      - name: PUT operation (store test-key)
+        run: |
+          curl -X PUT http://localhost:8080/kv/test-key -d "test-value"
+
+      # Step 7: GET operation - retrieve the key-value pair
+      - name: GET operation (retrieve test-key)
+        run: |
+          response=$(curl -s http://localhost:8080/kv/test-key)
+          echo "Response: $response"
+          # Check if the key is found
+          if echo "$response" | grep -q '"found":true'; then
+            echo "Key found successfully"
+          else
+            echo "Key not found!"
+            exit 1  # Fail the workflow if key is not found
+          fi
+
+      # Step 8: DELETE operation - remove the key-value pair
+      - name: DELETE operation (remove test-key)
+        run: |
+          curl -X DELETE http://localhost:8080/kv/test-key
+
+      # Step 9: GET operation again - ensure the key is deleted
+      - name: GET operation after DELETE (ensure test-key is gone)
+        run: |
+          response=$(curl -s http://localhost:8080/kv/test-key)
+          echo "Response: $response"
+          if echo "$response" | grep -q '"found":false'; then
+            echo "Key successfully deleted"
+          else
+            echo "Key is still present!"
+            exit 1  # Fail the workflow if key is still present
+          fi
+
+      # Step 10: Optionally, stop the server (cleanup)
+      - name: Stop server
+        run: |
+          pkill -f "go run ./cmd/dhtnode"
