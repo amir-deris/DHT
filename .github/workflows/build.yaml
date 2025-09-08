@@ -50,7 +50,14 @@ jobs:
       - name: Start the server
         run: |
           go run ./cmd/dhtnode --node-id=test-node --bind=:8080 &
-          sleep 5  # Give the server time to start up
+
+      - name: Wait for server to be ready
+        run: |
+          echo "Waiting for server to be ready..."
+          for i in {1..10}; do
+            curl -s http://localhost:8080/healthz && break || echo "Attempt $i: Server not ready, retrying..."
+            sleep 5
+          done
 
       # PUT operation - store a key-value pair
       - name: PUT operation (store test-key)
