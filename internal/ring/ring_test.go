@@ -1,6 +1,7 @@
 package ring
 
 import (
+	"math"
 	"testing"
 )
 
@@ -26,6 +27,14 @@ func TestRingBasicOperations(t *testing.T) {
 	// Test ring size
 	if ring.Size() != 3 {
 		t.Errorf("Expected ring size 3, got %d", ring.Size())
+	}
+
+	if len(ring.vnodes) != 30 {
+		t.Errorf("Expected 30 vnodes, got %d", len(ring.vnodes))
+	}
+
+	if ring.ringSize != math.MaxUint64 {
+		t.Errorf("Expected ring size with max uint64, got %d", ring.ringSize)
 	}
 
 	// Test preference list
@@ -57,6 +66,16 @@ func TestRingBasicOperations(t *testing.T) {
 
 	if ring.Size() != 2 {
 		t.Errorf("Expected ring size 2 after removal, got %d", ring.Size())
+	}
+
+	if len(ring.vnodes) != 20 {
+		t.Errorf("Expected 20 vnodes after removal, got %d", len(ring.vnodes))
+	}
+
+	for _, vnode := range ring.vnodes {
+		if vnode.NodeID == "node2" {
+			t.Errorf("Node2 still exists in vnodes")
+		}
 	}
 
 	// Test that removed node is not in preference list
