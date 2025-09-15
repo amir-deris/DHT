@@ -47,6 +47,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - name: run tests
+        run: go test -count=1 ./...
       - name: Start the server
         run: |
           go run ./cmd/dhtnode --node-id=test-node --bind=:8080 &
