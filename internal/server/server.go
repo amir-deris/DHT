@@ -11,6 +11,7 @@ import (
 
 	"github.com/amirderis/DHT/internal/config"
 	"github.com/amirderis/DHT/internal/storage"
+	"github.com/amirderis/DHT/internal/ring"
 	"github.com/amirderis/DHT/pkg/api"
 )
 
@@ -19,6 +20,7 @@ type HTTPServer struct {
 	server    *http.Server
 	readyFlag atomic.Bool
 	storage   storage.Engine
+	ring      *ring.Ring
 }
 
 func NewHTTPServer(cfg *config.Config) *HTTPServer {
@@ -26,7 +28,11 @@ func NewHTTPServer(cfg *config.Config) *HTTPServer {
 	s := &HTTPServer{
 		cfg:     cfg,
 		storage: storage.NewInMemory(),
+		ring:    ring.New(20), // 20 virtual nodes per physical node
 	}
+
+	// Initialize ring with this node
+	s.ring.AddNode(ring.NodeID(cfg.NodeID), cfg.BindAddr)
 
 	// Health and readiness endpoints
 	mux.HandleFunc("/healthz", s.handleHealth)
