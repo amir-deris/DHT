@@ -6,13 +6,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/amirderis/DHT/internal/config"
-	"github.com/amirderis/DHT/internal/storage"
 	"github.com/amirderis/DHT/internal/ring"
+	"github.com/amirderis/DHT/internal/storage"
 	"github.com/amirderis/DHT/pkg/api"
+)
+
+const (
+	readConsistencyHeader = "X-Consistency-R"
+	writeConsistencyHeader = "X-Consistency-W"
 )
 
 type HTTPServer struct {
@@ -98,7 +104,8 @@ func (s *HTTPServer) handleKV(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *HTTPServer) handleGet(w http.ResponseWriter, _ *http.Request, key string) {
+func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, key string) {
+	readQuorum := s.getQuorumFromHeader(r, readConsistencyHeader, s.cfg.ReadQuorum)
 	value, found := s.storage.Get(key)
 
 	response := api.GetResponse{
@@ -117,6 +124,7 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, _ *http.Request, key strin
 }
 
 func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, key string) {
+	writeQuorum := s.getQuorumFromHeader(r, writeConsistencyHeader, s.cfg.WriteQuorum)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "failed to read request body")
@@ -159,4 +167,15 @@ func (s *HTTPServer) writeError(w http.ResponseWriter, status int, message strin
 	w.WriteHeader(status)
 	errorResp := map[string]string{"error": message}
 	json.NewEncoder(w).Encode(errorResp)
+}
+
+func (s *HTTPServer) getQuorumFromHeader(r *http.Request, headerName string, defaultValue int) int {
+	if headerValue := r.Header.Get(headerName); headerValue != "" {
+		var quorum int
+		quorum, err := strconv.Atoi(headerValue)
+		if err == nil && quorum > 0 {
+			return quorum
+		}
+	}
+	return defaultValue
 }
