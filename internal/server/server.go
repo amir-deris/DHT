@@ -51,6 +51,9 @@ func NewHTTPServer(cfg *config.Config) *HTTPServer {
 	// KV API endpoints
 	mux.HandleFunc("/kv/", s.handleKV)
 
+	// Internal storage endpoints
+	mux.HandleFunc("/internal/storage/", s.handleInternalStorage)
+
 	s.server = &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      mux,
@@ -188,6 +191,51 @@ func (s *HTTPServer) handleDelete(w http.ResponseWriter, _ *http.Request, key st
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HTTPServer) handleInternalStorage(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Path[len("/internal/storage/"):]
+	if key == "" {
+		s.writeError(w, http.StatusBadRequest, "key cannot be empty")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		value, found := s.storage.Get(key)
+		response := api.ReplicateGetResponse{
+			Key:   key,
+			Value: value,
+			Found: found,
+		}
+		if found {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		s.writeJSON(w, response)
+	case http.MethodPost:
+		var req api.ReplicateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if err := s.storage.Put(key, req.Value); err != nil {
+			response := api.ReplicateResponse{
+				Success: false,
+				Error:   "failed to store value",
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			s.writeJSON(w, response)
+			return
+		}
+
+		response := api.ReplicateResponse{Success: true}
+		w.WriteHeader(http.StatusOK)
+		s.writeJSON(w, response)
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: " + r.Method)
+	}
 }
 
 func (s *HTTPServer) writeJSON(w http.ResponseWriter, v any) {
