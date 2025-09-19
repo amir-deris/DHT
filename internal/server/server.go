@@ -27,6 +27,7 @@ type HTTPServer struct {
 	readyFlag atomic.Bool
 	storage   storage.Engine
 	ring      *ring.Ring
+	client    *http.Client
 }
 
 func NewHTTPServer(cfg *config.Config) *HTTPServer {
@@ -35,6 +36,9 @@ func NewHTTPServer(cfg *config.Config) *HTTPServer {
 		cfg:     cfg,
 		storage: storage.NewInMemory(),
 		ring:    ring.New(20), // 20 virtual nodes per physical node
+		client: &http.Client{
+			Timeout: 5 * time.Second,
+		},
 	}
 
 	// Initialize ring with this node
@@ -106,20 +110,52 @@ func (s *HTTPServer) handleKV(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	readQuorum := s.getQuorumFromHeader(r, readConsistencyHeader, s.cfg.ReadQuorum)
-	value, found := s.storage.Get(key)
 
-	response := api.GetResponse{
-		Key:   key,
-		Value: value,
-		Found: found,
+	preferenceList, err := s.ring.GetPreferenceList(key, s.cfg.ReplicationFactor)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "failed to get preference list for key: " + key)
+		return
 	}
 
-	if found {
+	// If we only have one node or read quorum=1, just read locally
+	if len(preferenceList) == 1 || readQuorum == 1 {
+		value, found := s.storage.Get(key)
+		response := api.GetResponse{
+			Key:   key,
+			Value: value,
+			Found: found,
+		}
+		if found {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+		s.writeJSON(w, response)
+		return
+	}
+
+	// Read from multiple nodes
+	responses := s.readFromNodes(key, preferenceList, readQuorum)
+	if len(responses) < readQuorum {
+		message := fmt.Sprintf("expected %d replicas, got %d", readQuorum, len(responses))
+		s.writeError(w, http.StatusServiceUnavailable, message)
+		return
+	}
+	
+	// For now, return the first successful response
+	// TODO: Implement conflict resolution in Phase 3
+	var response api.GetResponse
+	for _, resp := range responses {
+		if resp.Found {
+			response = resp
+			break
+		}
+	}
+	if response.Found {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusNotFound)
 	}
-
 	s.writeJSON(w, response)
 }
 
@@ -178,4 +214,60 @@ func (s *HTTPServer) getQuorumFromHeader(r *http.Request, headerName string, def
 		}
 	}
 	return defaultValue
+}
+
+func (s *HTTPServer) readFromNodes(key string, prefList []ring.NodeID, readQuorum int) []api.GetResponse {
+	responses := make([]api.GetResponse, 0, len(prefList))
+
+	for _, nodeID := range prefList {
+		if len(responses) >= readQuorum {
+			break
+		}
+
+		// If it's this node, read locally
+		if nodeID == ring.NodeID(s.cfg.NodeID) {
+			value, found := s.storage.Get(key)
+			responses = append(responses, api.GetResponse{
+				Key:   key,
+				Value: value,
+				Found: found,
+			})
+			continue
+		}
+
+		// Read from remote node
+		address, exists := s.ring.GetNodeAddress(nodeID)
+		if !exists {
+			continue
+		}
+
+		resp, err := s.readFromRemoteNode(address, key)
+		if err == nil {
+			responses = append(responses, resp)
+		}
+	}
+	return responses
+}
+
+func (s *HTTPServer) readFromRemoteNode(address, key string) (api.GetResponse, error) {
+	url := fmt.Sprintf("http://%s/internal/storage/%s", address, key)
+	resp, err := s.client.Get(url)
+	if err != nil {
+		return api.GetResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return api.GetResponse{}, fmt.Errorf("remote node returned status %d", resp.StatusCode)
+	}
+
+	var result api.ReplicateGetResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return api.GetResponse{}, err
+	}
+	return api.GetResponse{
+		Key:   result.Key,
+		Value: result.Value,
+		Found: result.Found,
+	}, nil
 }
