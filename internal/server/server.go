@@ -109,7 +109,7 @@ func (s *HTTPServer) handleKV(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleDelete(w, r, key)
 	default:
-		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: " + r.Method)
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: "+r.Method)
 	}
 }
 
