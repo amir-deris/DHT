@@ -93,7 +93,7 @@ func (s *HTTPServer) handleReady(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "ready")
 }
 
-// handleKV routes GET/PUT/DELETE requests to appropriate handlers
+// handleKV routes GET/PUT/DELETE requests for a key to appropriate handlers
 func (s *HTTPServer) handleKV(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Path[len("/kv/"):]
 	if key == "" {
@@ -109,7 +109,7 @@ func (s *HTTPServer) handleKV(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleDelete(w, r, key)
 	default:
-		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: " + r.Method)
 	}
 }
 
