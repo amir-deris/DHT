@@ -1,12 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,7 +19,7 @@ import (
 )
 
 const (
-	readConsistencyHeader = "X-Consistency-R"
+	readConsistencyHeader  = "X-Consistency-R"
 	writeConsistencyHeader = "X-Consistency-W"
 )
 
@@ -116,7 +118,7 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, key strin
 
 	preferenceList, err := s.ring.GetPreferenceList(key, s.cfg.ReplicationFactor)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "failed to get preference list for key: " + key)
+		s.writeError(w, http.StatusInternalServerError, "failed to get preference list for key: "+key)
 		return
 	}
 
@@ -144,7 +146,7 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, key strin
 		s.writeError(w, http.StatusServiceUnavailable, message)
 		return
 	}
-	
+
 	// For now, return the first successful response
 	// TODO: Implement conflict resolution in Phase 3
 	var response api.GetResponse
@@ -171,17 +173,104 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, key strin
 	}
 	defer r.Body.Close()
 
-	if err := s.storage.Put(key, body); err != nil {
-		s.writeError(w, http.StatusInternalServerError, "failed to store value")
+	preferenceList, err := s.ring.GetPreferenceList(key, s.cfg.ReplicationFactor)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "failed to get preference list for key: "+key)
 		return
 	}
 
-	response := api.PutResponse{
-		Version: map[string]uint64{s.cfg.NodeID: 1}, // Placeholder for vector clock
+	// Create version (placeholder for vector clock)
+	version := map[string]uint64{s.cfg.NodeID: 1}
+
+	// If we only have one node or write quorum=1, just write locally
+	if len(preferenceList) == 1 || writeQuorum == 1 {
+		if err := s.storage.Put(key, body); err != nil {
+			s.writeError(w, http.StatusInternalServerError, "failed to store value")
+			return
+		}
+
+		response := api.PutResponse{Version: version}
+		w.WriteHeader(http.StatusOK)
+		s.writeJSON(w, response)
+		return
 	}
 
+	// Write to multiple nodes
+	successCount := s.writeToNodes(key, body, version, preferenceList, writeQuorum)
+	if successCount < writeQuorum {
+		s.writeError(w, http.StatusServiceUnavailable, "insufficient replicas available for write quorum for key: "+key)
+		return
+	}
+
+	response := api.PutResponse{Version: version}
 	w.WriteHeader(http.StatusOK)
 	s.writeJSON(w, response)
+}
+
+// writeToNodes writes to multiple nodes and returns success count
+func (s *HTTPServer) writeToNodes(key string, value []byte, version map[string]uint64, prefList []ring.NodeID, writeQuorum int) int {
+	successCount := 0
+
+	for _, nodeID := range prefList {
+		if successCount >= writeQuorum {
+			break
+		}
+
+		// If it's this node, write locally
+		if nodeID == ring.NodeID(s.cfg.NodeID) {
+			if err := s.storage.Put(key, value); err == nil {
+				successCount++
+			} else {
+				fmt.Printf("failed to write to local node %s for key: %s, error: %v\n", s.cfg.NodeID, key, err)
+			}
+			continue
+		}
+
+		// Write to remote node
+		address, exists := s.ring.GetNodeAddress(nodeID)
+		if !exists {
+			fmt.Printf("node %s not found in ring for key: %s\n", nodeID, key)
+			continue
+		}
+		if err := s.writeToRemoteNode(address, key, value, version); err == nil {
+			successCount++
+		} else {
+			fmt.Printf("failed to write to remote node %s for key: %s, error: %v\n", address, key, err)
+		}
+	}
+	return successCount
+}
+
+func (s *HTTPServer) writeToRemoteNode(address, key string, value []byte, version map[string]uint64) error {
+	req := api.ReplicateRequest{
+		Key:     key,
+		Value:   value,
+		Version: version,
+	}
+	var jsonData bytes.Buffer
+	if err := json.NewEncoder(&jsonData).Encode(req); err != nil {
+		return err
+	}
+	url := fmt.Sprintf("http://%s/internal/storage/%s", address, key)
+	resp, err := s.client.Post(url, "application/json", strings.NewReader(jsonData.String()))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote node %s returned status %d", address, resp.StatusCode)
+	}
+
+	var result api.ReplicateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if !result.Success {
+		return fmt.Errorf("remote node %s failed to store value", address)
+	}
+
+	return nil
 }
 
 func (s *HTTPServer) handleDelete(w http.ResponseWriter, _ *http.Request, key string) {
@@ -234,7 +323,7 @@ func (s *HTTPServer) handleInternalStorage(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusOK)
 		s.writeJSON(w, response)
 	default:
-		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: " + r.Method)
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed: "+r.Method)
 	}
 }
 
