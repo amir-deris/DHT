@@ -13,6 +13,7 @@ type VersionedValue struct {
 	Value     []byte            `json:"value"`
 	Version   clock.VectorClock `json:"version"`
 	Timestamp time.Time         `json:"timestamp"`
+	Tombstone bool
 }
 
 // NewVersionedValue creates a new versioned value with the given data and vector clock.
@@ -21,6 +22,7 @@ func NewVersionedValue(value []byte, version clock.VectorClock) *VersionedValue 
 		Value:     value,
 		Version:   version,
 		Timestamp: time.Now(),
+		Tombstone: false,
 	}
 }
 
@@ -38,6 +40,7 @@ func (vv *VersionedValue) Copy() *VersionedValue {
 		Value:     valueCopy,
 		Version:   vv.Version.Copy(),
 		Timestamp: vv.Timestamp,
+		Tombstone: vv.Tombstone,
 	}
 }
 
@@ -46,29 +49,12 @@ func (vv *VersionedValue) IsEmpty() bool {
 	return vv == nil || len(vv.Value) == 0
 }
 
-// IsTombstone returns true if this represents a deleted key.
-func (vv *VersionedValue) IsTombstone() bool {
-	return vv != nil && len(vv.Value) == 0 && !vv.Version.IsEmpty()
-}
-
-// CreateTombstone creates a tombstone (deleted key marker) with the given vector clock.
-func CreateTombstone(version clock.VectorClock) *VersionedValue {
-	return &VersionedValue{
-		Value:     []byte{}, // Empty value indicates tombstone
-		Version:   version,
-		Timestamp: time.Now(),
-	}
-}
-
 // VersionedEngine extends the basic Engine interface to handle versioned data.
 type VersionedEngine interface {
 	// Basic operations with versioned data
 	GetVersioned(key string) (*VersionedValue, bool)
 	PutVersioned(key string, value *VersionedValue) error
 	DeleteVersioned(key string, version clock.VectorClock) error
-
-	// Legacy interface for backward compatibility
-	Engine
 }
 
 // VersionedInMemory is an in-memory implementation of VersionedEngine.
@@ -115,30 +101,8 @@ func (s *VersionedInMemory) DeleteVersioned(key string, version clock.VectorCloc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tombstone := CreateTombstone(version)
-	s.data[key] = tombstone
-	return nil
-}
-
-// Legacy Engine interface implementation for backward compatibility
-
-func (s *VersionedInMemory) Get(key string) ([]byte, bool) {
-	value, found := s.GetVersioned(key)
-	if !found || value.IsTombstone() {
-		return nil, false
+	if value, ok := s.data[key]; ok {
+		value.Tombstone = true
 	}
-	return value.Value, true
-}
-
-func (s *VersionedInMemory) Put(key string, value []byte) error {
-	// Create a simple version for backward compatibility
-	version := clock.NewWithNode("legacy")
-	versionedValue := NewVersionedValue(value, version)
-	return s.PutVersioned(key, versionedValue)
-}
-
-func (s *VersionedInMemory) Delete(key string) error {
-	// Create a simple version for backward compatibility
-	version := clock.NewWithNode("legacy")
-	return s.DeleteVersioned(key, version)
+	return nil
 }
