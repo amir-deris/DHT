@@ -54,27 +54,32 @@ type VersionedEngine interface {
 	// Basic operations with versioned data
 	GetVersioned(key string) (*VersionedValue, bool)
 	PutVersioned(key string, value *VersionedValue) error
-	DeleteVersioned(key string, version clock.VectorClock) error
+	DeleteVersioned(key string) error
 }
+
+var _ VersionedEngine = (*VersionedInMemory)(nil)
 
 // VersionedInMemory is an in-memory implementation of VersionedEngine.
 type VersionedInMemory struct {
-	mu       sync.RWMutex
-	data     map[string]*VersionedValue
+	mu   sync.RWMutex
+	data map[string]*VersionedValue
 }
 
 // NewVersionedInMemory creates a new in-memory versioned storage engine.
 func NewVersionedInMemory() *VersionedInMemory {
 	return &VersionedInMemory{
-		data:     make(map[string]*VersionedValue),
+		data: make(map[string]*VersionedValue),
 	}
+}
+
+func (s *VersionedInMemory) LockForOperation(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f()
 }
 
 // GetVersioned retrieves the versioned value for a key.
 func (s *VersionedInMemory) GetVersioned(key string) (*VersionedValue, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	value, exists := s.data[key]
 	if !exists {
 		return nil, false
@@ -85,9 +90,6 @@ func (s *VersionedInMemory) GetVersioned(key string) (*VersionedValue, bool) {
 
 // PutVersioned stores a versioned value for a key.
 func (s *VersionedInMemory) PutVersioned(key string, value *VersionedValue) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if value == nil {
 		return fmt.Errorf("cannot store nil versioned value")
 	}
@@ -97,10 +99,7 @@ func (s *VersionedInMemory) PutVersioned(key string, value *VersionedValue) erro
 }
 
 // DeleteVersioned marks a key as deleted with a tombstone.
-func (s *VersionedInMemory) DeleteVersioned(key string, version clock.VectorClock) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *VersionedInMemory) DeleteVersioned(key string) error {
 	if value, ok := s.data[key]; ok {
 		value.Tombstone = true
 	}

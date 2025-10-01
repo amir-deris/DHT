@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,7 +21,7 @@ func TestNewVersionedValue(t *testing.T) {
 		t.Error("Expected tombstone to be false")
 	}
 	now := time.Now()
-	if v.Timestamp.Before(now.Add(-2 * time.Second)) || v.Timestamp.After(now.Add(2 * time.Second)) {
+	if v.Timestamp.Before(now.Add(-2*time.Second)) || v.Timestamp.After(now.Add(2*time.Second)) {
 		t.Errorf("Expected timestamp to be close to current time, got difference %f", v.Timestamp.Sub(now).Seconds())
 	}
 }
@@ -58,5 +60,41 @@ func TestEmpty(t *testing.T) {
 }
 
 func TestVersionedEngine(t *testing.T) {
-	t.Error("to be completed")
+	const key = "key"
+	ve := VersionedInMemory{
+		data: map[string]*VersionedValue{key: NewVersionedValue([]byte(strconv.Itoa(1)), clock.VectorClock{"node1": 1})},
+	}
+	wg := sync.WaitGroup{}
+	wg.Add(5)
+	for i := 0; i < 5; i++ {
+		go func() {
+			defer wg.Done()
+			ve.LockForOperation(func() {
+				versionedValue, _ := ve.GetVersioned(key)
+				val, err := strconv.Atoi(string(versionedValue.Value))
+				if err != nil {
+					t.Error(err)
+				}
+				val = val + 1
+				versionedValue.Value = []byte(strconv.Itoa(val))
+				err = ve.PutVersioned(key, versionedValue)
+				if err != nil {
+					t.Error(err)
+				}
+			})
+		}()
+	}
+	wg.Wait()
+	val, found := ve.GetVersioned(key)
+	if !found {
+		t.Error("Expected key to be found")
+	}
+	updatedValue, err := strconv.Atoi(string(val.Value))
+	if err != nil {
+		t.Errorf("Expected error to be nil, got %s", err)
+	}
+	if updatedValue != 1+5 {
+		t.Errorf("Expected updated value to be %d, got %d", 1+5, updatedValue)
+	}
+	ve.DeleteVersioned(key)
 }
