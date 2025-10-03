@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/amirderis/DHT/internal/clock"
@@ -57,51 +56,95 @@ type VersionedEngine interface {
 	DeleteVersioned(key string) error
 }
 
-var _ VersionedEngine = (*VersionedInMemory)(nil)
+var _ VersionedEngine = (*VersionedInMemoryChannel)(nil)
 
-// VersionedInMemory is an in-memory implementation of VersionedEngine.
-type VersionedInMemory struct {
-	mu   sync.RWMutex
+type VersionedInMemoryChannel struct {
 	data map[string]*VersionedValue
+	cw   chan dataCommand    //for writing
+	cr   chan VersionedValue //for reading
 }
 
-// NewVersionedInMemory creates a new in-memory versioned storage engine.
-func NewVersionedInMemory() *VersionedInMemory {
-	return &VersionedInMemory{
+func NewVersionedInMemoryChannel() *VersionedInMemoryChannel {
+	versionedMemory := &VersionedInMemoryChannel{
 		data: make(map[string]*VersionedValue),
+		cw:   make(chan dataCommand),
+		cr:   make(chan VersionedValue),
+	}
+	go readMessage(versionedMemory)
+	return versionedMemory
+}
+
+func readMessage(v *VersionedInMemoryChannel) {
+	for {
+		dataCommand := <-v.cw
+		key := dataCommand.key
+		switch dataCommand.command {
+		case Get:
+			if value, ok := v.data[key]; ok {
+				v.cr <- *value.Copy()
+			} else {
+				v.cr <- *NewVersionedValue(nil, nil)
+			}
+		case Put:
+			v.data[key] = dataCommand.value
+		case Delete:
+			if value, ok := v.data[key]; ok {
+				value.Tombstone = true
+			}
+		default:
+			panic("Unknown command")
+		}
 	}
 }
 
-func (s *VersionedInMemory) LockForOperation(f func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	f()
-}
-
-// GetVersioned retrieves the versioned value for a key.
-func (s *VersionedInMemory) GetVersioned(key string) (*VersionedValue, bool) {
-	value, exists := s.data[key]
-	if !exists {
-		return nil, false
+func (v *VersionedInMemoryChannel) GetVersioned(key string) (*VersionedValue, bool) {
+	d := dataCommand{
+		command: Get,
+		key:     key,
 	}
-
-	return value.Copy(), true
+	v.cw <- d
+	val := <-v.cr
+	return &val, true
 }
 
-// PutVersioned stores a versioned value for a key.
-func (s *VersionedInMemory) PutVersioned(key string, value *VersionedValue) error {
+func (v *VersionedInMemoryChannel) PutVersioned(key string, value *VersionedValue) error {
 	if value == nil {
 		return fmt.Errorf("cannot store nil versioned value")
 	}
-
-	s.data[key] = value.Copy()
+	d := dataCommand{
+		command: Put,
+		key:     key,
+		value:   value.Copy(),
+	}
+	v.cw <- d
+	fmt.Println("PUT VALUE FOR KEY ", key)
 	return nil
 }
 
-// DeleteVersioned marks a key as deleted with a tombstone.
-func (s *VersionedInMemory) DeleteVersioned(key string) error {
-	if value, ok := s.data[key]; ok {
-		value.Tombstone = true
+func (v *VersionedInMemoryChannel) DeleteVersioned(key string) error {
+	if value, ok := v.data[key]; ok {
+		d := dataCommand{
+			command: Delete,
+			key:     key,
+			value:   value,
+		}
+		v.cw <- d
+	} else {
+		return fmt.Errorf("key %s not found", key)
 	}
 	return nil
 }
+
+type dataCommand struct {
+	command
+	key   string
+	value *VersionedValue
+}
+
+type command int
+
+const (
+	Get command = iota
+	Put
+	Delete
+)
