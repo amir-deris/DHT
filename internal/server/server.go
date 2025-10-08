@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/amirderis/DHT/internal/clock"
 	"github.com/amirderis/DHT/internal/config"
 	"github.com/amirderis/DHT/internal/ring"
 	"github.com/amirderis/DHT/internal/storage"
@@ -27,7 +28,7 @@ type HTTPServer struct {
 	cfg       *config.Config
 	server    *http.Server
 	readyFlag atomic.Bool
-	storage   storage.Engine
+	storage   storage.VersionedEngine
 	ring      *ring.Ring
 	client    *http.Client
 }
@@ -36,7 +37,7 @@ func NewHTTPServer(cfg *config.Config) *HTTPServer {
 	mux := http.NewServeMux()
 	s := &HTTPServer{
 		cfg:     cfg,
-		storage: storage.NewInMemory(),
+		storage: storage.NewVersionedInMemoryChannel(),
 		ring:    ring.New(20), // 20 virtual nodes per physical node
 		client: &http.Client{
 			Timeout: 5 * time.Second,
@@ -124,13 +125,13 @@ func (s *HTTPServer) handleGet(w http.ResponseWriter, r *http.Request, key strin
 
 	// If we only have one node or read quorum=1, just read locally
 	if len(preferenceList) == 1 || readQuorum == 1 {
-		value, found := s.storage.Get(key)
+		versionedValue, found := s.storage.GetVersioned(key)
 		response := api.GetResponse{
 			Key:   key,
-			Value: value,
-			Found: found,
+			Value: versionedValue.Value,
+			Found: found && !versionedValue.Tombstone,
 		}
-		if found {
+		if found && !versionedValue.Tombstone {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusNotFound)
@@ -179,12 +180,13 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, key strin
 		return
 	}
 
-	// Create version (placeholder for vector clock)
-	version := map[string]uint64{s.cfg.NodeID: 1}
+	// Create versioned value with vector clock
+	version := clock.NewWithNode(s.cfg.NodeID)
+	versionedValue := storage.NewVersionedValue(body, version)
 
 	// If we only have one node or write quorum=1, just write locally
 	if len(preferenceList) == 1 || writeQuorum == 1 {
-		if err := s.storage.Put(key, body); err != nil {
+		if err := s.storage.PutVersioned(key, versionedValue); err != nil {
 			s.writeError(w, http.StatusInternalServerError, "failed to store value")
 			return
 		}
@@ -196,7 +198,7 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, key strin
 	}
 
 	// Write to multiple nodes
-	successCount := s.writeToNodes(key, body, version, preferenceList, writeQuorum)
+	successCount := s.writeToNodes(key, versionedValue, preferenceList, writeQuorum)
 	if successCount < writeQuorum {
 		s.writeError(w, http.StatusServiceUnavailable, "insufficient replicas available for write quorum for key: "+key)
 		return
@@ -208,7 +210,7 @@ func (s *HTTPServer) handlePut(w http.ResponseWriter, r *http.Request, key strin
 }
 
 // writeToNodes writes to multiple nodes and returns success count
-func (s *HTTPServer) writeToNodes(key string, value []byte, version map[string]uint64, prefList []ring.NodeID, writeQuorum int) int {
+func (s *HTTPServer) writeToNodes(key string, versionedValue *storage.VersionedValue, prefList []ring.NodeID, writeQuorum int) int {
 	successCount := 0
 
 	for _, nodeID := range prefList {
@@ -218,7 +220,7 @@ func (s *HTTPServer) writeToNodes(key string, value []byte, version map[string]u
 
 		// If it's this node, write locally
 		if nodeID == ring.NodeID(s.cfg.NodeID) {
-			if err := s.storage.Put(key, value); err == nil {
+			if err := s.storage.PutVersioned(key, versionedValue); err == nil {
 				successCount++
 			} else {
 				fmt.Printf("failed to write to local node %s for key: %s, error: %v\n", s.cfg.NodeID, key, err)
@@ -232,7 +234,7 @@ func (s *HTTPServer) writeToNodes(key string, value []byte, version map[string]u
 			fmt.Printf("node %s not found in ring for key: %s\n", nodeID, key)
 			continue
 		}
-		if err := s.writeToRemoteNode(address, key, value, version); err == nil {
+		if err := s.writeToRemoteNode(address, key, versionedValue); err == nil {
 			successCount++
 		} else {
 			fmt.Printf("failed to write to remote node %s for key: %s, error: %v\n", address, key, err)
@@ -241,11 +243,11 @@ func (s *HTTPServer) writeToNodes(key string, value []byte, version map[string]u
 	return successCount
 }
 
-func (s *HTTPServer) writeToRemoteNode(address, key string, value []byte, version map[string]uint64) error {
+func (s *HTTPServer) writeToRemoteNode(address, key string, versionedValue *storage.VersionedValue) error {
 	req := api.ReplicateRequest{
 		Key:     key,
-		Value:   value,
-		Version: version,
+		Value:   versionedValue.Value,
+		Version: versionedValue.Version,
 	}
 	var jsonData bytes.Buffer
 	if err := json.NewEncoder(&jsonData).Encode(req); err != nil {
@@ -274,7 +276,7 @@ func (s *HTTPServer) writeToRemoteNode(address, key string, value []byte, versio
 }
 
 func (s *HTTPServer) handleDelete(w http.ResponseWriter, _ *http.Request, key string) {
-	if err := s.storage.Delete(key); err != nil {
+	if err := s.storage.DeleteVersioned(key); err != nil {
 		s.writeError(w, http.StatusInternalServerError, "failed to delete key")
 		return
 	}
@@ -291,13 +293,13 @@ func (s *HTTPServer) handleInternalStorage(w http.ResponseWriter, r *http.Reques
 
 	switch r.Method {
 	case http.MethodGet:
-		value, found := s.storage.Get(key)
+		versionedValue, found := s.storage.GetVersioned(key)
 		response := api.ReplicateGetResponse{
 			Key:   key,
-			Value: value,
-			Found: found,
+			Value: versionedValue.Value,
+			Found: found && !versionedValue.Tombstone,
 		}
-		if found {
+		if found && !versionedValue.Tombstone {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusNotFound)
@@ -309,7 +311,10 @@ func (s *HTTPServer) handleInternalStorage(w http.ResponseWriter, r *http.Reques
 			s.writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if err := s.storage.Put(key, req.Value); err != nil {
+
+		// Convert the request to a versioned value
+		versionedValue := storage.NewVersionedValue(req.Value, req.Version)
+		if err := s.storage.PutVersioned(key, versionedValue); err != nil {
 			response := api.ReplicateResponse{
 				Success: false,
 				Error:   "failed to store value",
@@ -363,11 +368,11 @@ func (s *HTTPServer) readFromNodes(key string, prefList []ring.NodeID, readQuoru
 
 		// If it's this node, read locally
 		if nodeID == ring.NodeID(s.cfg.NodeID) {
-			value, found := s.storage.Get(key)
+			versionedValue, found := s.storage.GetVersioned(key)
 			responses = append(responses, api.GetResponse{
 				Key:   key,
-				Value: value,
-				Found: found,
+				Value: versionedValue.Value,
+				Found: found && !versionedValue.Tombstone,
 			})
 			continue
 		}
